@@ -3,17 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MathType to OMML Converter</title>
-    <!-- Tailwind CSS for styling -->
+    <title>MathType to OMML Converter (Safe Mode)</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- JSZip for client-side .docx manipulation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans min-h-screen flex items-center justify-center p-6">
 
     <div class="max-w-2xl w-full bg-white rounded-xl shadow-lg p-8 border border-gray-100">
         <h1 class="text-2xl font-bold text-gray-900 mb-2">MathType to OMML Converter</h1>
-        <p class="text-sm text-gray-500 mb-6">100% Client-Side Processing. Your documents never leave your browser.</p>
+        <p class="text-sm text-gray-500 mb-6">100% Client-Side. Failsafe enabled to prevent equation data loss.</p>
 
         <!-- Drag and Drop Upload Area -->
         <div id="dropZone" class="border-2 border-dashed border-blue-400 rounded-lg p-10 text-center cursor-pointer hover:bg-blue-50 transition-colors bg-gray-50 relative group">
@@ -34,7 +32,7 @@
         <!-- Download Button -->
         <div class="mt-6 text-center">
             <button id="downloadBtn" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-8 rounded-lg shadow-md transition-all">
-                Download Converted .docx
+                Download Processed .docx
             </button>
         </div>
     </div>
@@ -48,10 +46,12 @@
         let convertedBlob = null;
         let originalFileName = "";
 
-        // UI Helpers
-        function logMsg(msg, isError = false) {
+        function logMsg(msg, isWarning = false, isError = false) {
             const time = new Date().toLocaleTimeString();
-            const color = isError ? 'text-red-400' : 'text-green-400';
+            let color = 'text-green-400';
+            if (isWarning) color = 'text-yellow-400';
+            if (isError) color = 'text-red-400';
+            
             logArea.innerHTML += `\n<span class="text-gray-500">[${time}]</span> <span class="${color}">${msg}</span>`;
             logArea.scrollTop = logArea.scrollHeight;
         }
@@ -60,70 +60,47 @@
             logArea.innerHTML = 'Starting processing...';
         }
 
-        // Drag and Drop Visuals
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('bg-blue-100', 'border-blue-500');
-        });
-        dropZone.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('bg-blue-100', 'border-blue-500');
-        });
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('bg-blue-100', 'border-blue-500'); });
+        dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); dropZone.classList.remove('bg-blue-100', 'border-blue-500'); });
         dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('bg-blue-100', 'border-blue-500');
-            if (e.dataTransfer.files.length) {
-                handleFile(e.dataTransfer.files[0]);
-            }
+            e.preventDefault(); dropZone.classList.remove('bg-blue-100', 'border-blue-500');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
         });
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) {
-                handleFile(e.target.files[0]);
-            }
-        });
+        fileInput.addEventListener('change', (e) => { if (e.target.files.length) handleFile(e.target.files[0]); });
 
         async function handleFile(file) {
             if (!file.name.endsWith('.docx')) {
-                logMsg("Error: Please upload a valid .docx file.", true);
+                logMsg("Error: Please upload a valid .docx file.", false, true);
                 return;
             }
 
             originalFileName = file.name;
             clearLog();
-            logMsg(`Loaded file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`);
+            logMsg(`Loaded file: ${file.name}`);
             downloadBtn.disabled = true;
             convertedBlob = null;
 
             try {
                 const zip = new JSZip();
-                logMsg("Unzipping .docx archive...");
                 const loadedZip = await zip.loadAsync(file);
+                const docXmlFile = loadedZip.file("word/document.xml");
 
-                const docXmlPath = "word/document.xml";
-                const docXmlFile = loadedZip.file(docXmlPath);
+                if (!docXmlFile) throw new Error("Invalid format: word/document.xml not found.");
 
-                if (!docXmlFile) {
-                    throw new Error("Invalid format: word/document.xml not found.");
-                }
-
-                logMsg("Parsing XML structure...");
                 const docXmlString = await docXmlFile.async("string");
-                
-                // Parse XML DOM
                 const parser = new DOMParser();
                 const xmlDoc = parser.parseFromString(docXmlString, "application/xml");
                 
-                // Set up OMML namespace
                 const mathNS = "http://schemas.openxmlformats.org/officeDocument/2006/math";
-                const wNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-
-                // Find all <w:object> tags which house OLE embeddings
                 const objects = xmlDoc.getElementsByTagName("w:object");
-                let mathTypeCount = 0;
+                
+                let mathTypeTotal = 0;
+                let convertedCount = 0;
+                let preservedCount = 0;
 
-                logMsg(`Found ${objects.length} total embedded objects. Scanning for MathType...`);
+                logMsg(`Found ${objects.length} embedded objects. Scanning for MathType...`);
 
-                // Iterate backwards because we are modifying the DOM live
+                // Iterate backwards because we modify the DOM live
                 for (let i = objects.length - 1; i >= 0; i--) {
                     const obj = objects[i];
                     const oleElements = obj.getElementsByTagName("o:OLEObject");
@@ -131,88 +108,81 @@
                     if (oleElements.length > 0) {
                         const progId = oleElements[0].getAttribute("ProgID") || "";
                         
-                        // Detect MathType (Equation.3 is MS Eq 3.0 / MathType, Equation.DSMT4 is MathType)
                         if (progId.includes("Equation")) {
-                            mathTypeCount++;
+                            mathTypeTotal++;
                             
-                            // Attempt to find MathML fallback inside <v:shape> alt text
+                            let mathText = null;
                             const shapes = obj.getElementsByTagName("v:shape");
-                            let fallbackMath = "[MathType Equation Converted]";
+                            
+                            // Check for readable text/MathML fallback
                             if (shapes.length > 0) {
                                 const altText = shapes[0].getAttribute("alt");
-                                if (altText && altText.includes("mml:math")) {
-                                    // Normally you would pass this through an XSLT to transform MathML to OMML.
-                                    // Without XSLT, we extract plaintext fallback.
-                                    fallbackMath = altText.replace(/<[^>]+>/g, '').trim() || fallbackMath;
+                                if (altText && altText.trim() !== "" && !altText.startsWith("OLE_LINK")) {
+                                    mathText = altText;
                                 }
                             }
 
-                            // Create native Office Math elements: <m:oMath><m:r><m:t>...</m:t></m:r></m:oMath>
-                            const mOmath = xmlDoc.createElementNS(mathNS, "m:oMath");
-                            const mR = xmlDoc.createElementNS(mathNS, "m:r");
-                            
-                            // Apply standard math font formatting if needed
-                            const mRPr = xmlDoc.createElementNS(mathNS, "m:rPr");
-                            const mSty = xmlDoc.createElementNS(mathNS, "m:sty");
-                            mSty.setAttributeNS(mathNS, "m:val", "p"); // standard paragraph style
-                            mRPr.appendChild(mSty);
-                            mR.appendChild(mRPr);
-
-                            const mT = xmlDoc.createElementNS(mathNS, "m:t");
-                            mT.textContent = fallbackMath;
-                            
-                            mR.appendChild(mT);
-                            mOmath.appendChild(mR);
-
-                            // Perform targeted in-place replacement
-                            obj.parentNode.replaceChild(mOmath, obj);
+                            if (mathText && mathText.length > 0) {
+                                // Conversion path: We have readable math data
+                                const cleanText = mathText.replace(/<[^>]+>/g, '').trim(); // Remove raw MathML tags for OMML text entry
+                                
+                                const mOmath = xmlDoc.createElementNS(mathNS, "m:oMath");
+                                const mR = xmlDoc.createElementNS(mathNS, "m:r");
+                                const mT = xmlDoc.createElementNS(mathNS, "m:t");
+                                mT.textContent = cleanText;
+                                
+                                mR.appendChild(mT);
+                                mOmath.appendChild(mR);
+                                obj.parentNode.replaceChild(mOmath, obj);
+                                convertedCount++;
+                            } else {
+                                // 🛡️ FAILSAFE ACTIVATED 🛡️
+                                // This equation is locked in MTEF binary. Replacing it will blank it out.
+                                // We skip replacement to preserve the original visual equation.
+                                preservedCount++;
+                            }
                         }
                     }
                 }
 
-                if (mathTypeCount === 0) {
-                    logMsg("No MathType equations found in this document. Text and images remain untouched.");
+                if (mathTypeTotal === 0) {
+                    logMsg("No MathType equations found. Document remains untouched.");
                 } else {
-                    logMsg(`Successfully replaced ${mathTypeCount} MathType object(s) with native Office Math (OMML).`);
+                    logMsg(`Scan complete. Found ${mathTypeTotal} MathType equation(s).`);
+                    if (convertedCount > 0) logMsg(`Converted ${convertedCount} equation(s) to OMML.`);
+                    if (preservedCount > 0) logMsg(`Safely preserved ${preservedCount} binary equation(s) to prevent data loss.`, true);
                 }
 
-                // Serialize modified DOM back to XML
-                logMsg("Re-packaging document preserving styles, text, and images...");
+                logMsg("Re-packaging document preserving styles and images...");
                 const serializer = new XMLSerializer();
                 const newDocXmlString = serializer.serializeToString(xmlDoc);
 
-                // Update the zip archive with the new document.xml
-                loadedZip.file(docXmlPath, newDocXmlString);
+                loadedZip.file("word/document.xml", newDocXmlString);
 
-                // Generate new Blob
                 convertedBlob = await loadedZip.generateAsync({
                     type: "blob",
                     compression: "DEFLATE",
                     compressionOptions: { level: 6 }
                 });
 
-                logMsg("Conversion complete! Ready for download.");
+                logMsg("Processing complete! Ready for download.");
                 downloadBtn.disabled = false;
 
             } catch (err) {
-                logMsg(`Error during processing: ${err.message}`, true);
+                logMsg(`Error: ${err.message}`, false, true);
                 console.error(err);
             }
         }
 
-        // Handle Download Button
         downloadBtn.addEventListener('click', () => {
             if (!convertedBlob) return;
-            
             const url = URL.createObjectURL(convertedBlob);
             const a = document.createElement('a');
-            const newName = originalFileName.replace('.docx', '_OMML.docx');
+            const newName = originalFileName.replace('.docx', '_SafeOMML.docx');
             a.href = url;
             a.download = newName;
-            
             document.body.appendChild(a);
             a.click();
-            
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
             logMsg(`File downloaded as: ${newName}`);
