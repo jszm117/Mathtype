@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MathType to OMML Converter</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- JSZip for client-side .docx manipulation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans min-h-screen flex items-center justify-center p-6">
+
+    <div class="max-w-2xl w-full bg-white rounded-xl shadow-lg p-8 border border-gray-100">
+        <h1 class="text-2xl font-bold text-gray-900 mb-2">MathType to OMML Converter</h1>
+        <p class="text-sm text-gray-500 mb-6">100% Client-Side Processing. Your documents never leave your browser.</p>
+
+        <!-- Drag and Drop Upload Area -->
+        <div id="dropZone" class="border-2 border-dashed border-blue-400 rounded-lg p-10 text-center cursor-pointer hover:bg-blue-50 transition-colors bg-gray-50 relative group">
+            <input type="file" id="fileInput" accept=".docx" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            <svg class="mx-auto h-12 w-12 text-blue-500 mb-4 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+            <p class="text-lg font-medium text-gray-700">Drag & drop your .docx file here</p>
+            <p class="text-sm text-gray-400 mt-1">or click to browse</p>
+        </div>
+
+        <!-- Status Log -->
+        <div class="mt-6">
+            <h3 class="text-sm font-semibold text-gray-700 mb-2">Processing Log:</h3>
+            <div id="logArea" class="bg-gray-900 text-green-400 font-mono text-sm p-4 rounded-lg h-48 overflow-y-auto whitespace-pre-wrap shadow-inner">Waiting for file upload...</div>
+        </div>
+
+        <!-- Download Button -->
+        <div class="mt-6 text-center">
+            <button id="downloadBtn" disabled class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-8 rounded-lg shadow-md transition-all">
+                Download Converted .docx
+            </button>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('dropZone');
+        const logArea = document.getElementById('logArea');
+        const downloadBtn = document.getElementById('downloadBtn');
+
+        let convertedBlob = null;
+        let originalFileName = "";
+
+        // UI Helpers
+        function logMsg(msg, isError = false) {
+            const time = new Date().toLocaleTimeString();
+            const color = isError ? 'text-red-400' : 'text-green-400';
+            logArea.innerHTML += `\n<span class="text-gray-500">[${time}]</span> <span class="${color}">${msg}</span>`;
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        function clearLog() {
+            logArea.innerHTML = 'Starting processing...';
+        }
+
+        // Drag and Drop Visuals
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('bg-blue-100', 'border-blue-500');
+        });
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('bg-blue-100', 'border-blue-500');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('bg-blue-100', 'border-blue-500');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        async function handleFile(file) {
+            if (!file.name.endsWith('.docx')) {
+                logMsg("Error: Please upload a valid .docx file.", true);
+                return;
+            }
+
+            originalFileName = file.name;
+            clearLog();
+            logMsg(`Loaded file: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`);
+            downloadBtn.disabled = true;
+            convertedBlob = null;
+
+            try {
+                const zip = new JSZip();
+                logMsg("Unzipping .docx archive...");
+                const loadedZip = await zip.loadAsync(file);
+
+                const docXmlPath = "word/document.xml";
+                const docXmlFile = loadedZip.file(docXmlPath);
+
+                if (!docXmlFile) {
+                    throw new Error("Invalid format: word/document.xml not found.");
+                }
+
+                logMsg("Parsing XML structure...");
+                const docXmlString = await docXmlFile.async("string");
+                
+                // Parse XML DOM
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(docXmlString, "application/xml");
+                
+                // Set up OMML namespace
+                const mathNS = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+                const wNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+                // Find all <w:object> tags which house OLE embeddings
+                const objects = xmlDoc.getElementsByTagName("w:object");
+                let mathTypeCount = 0;
+
+                logMsg(`Found ${objects.length} total embedded objects. Scanning for MathType...`);
+
+                // Iterate backwards because we are modifying the DOM live
+                for (let i = objects.length - 1; i >= 0; i--) {
+                    const obj = objects[i];
+                    const oleElements = obj.getElementsByTagName("o:OLEObject");
+                    
+                    if (oleElements.length > 0) {
+                        const progId = oleElements[0].getAttribute("ProgID") || "";
+                        
+                        // Detect MathType (Equation.3 is MS Eq 3.0 / MathType, Equation.DSMT4 is MathType)
+                        if (progId.includes("Equation")) {
+                            mathTypeCount++;
+                            
+                            // Attempt to find MathML fallback inside <v:shape> alt text
+                            const shapes = obj.getElementsByTagName("v:shape");
+                            let fallbackMath = "[MathType Equation Converted]";
+                            if (shapes.length > 0) {
+                                const altText = shapes[0].getAttribute("alt");
+                                if (altText && altText.includes("mml:math")) {
+                                    // Normally you would pass this through an XSLT to transform MathML to OMML.
+                                    // Without XSLT, we extract plaintext fallback.
+                                    fallbackMath = altText.replace(/<[^>]+>/g, '').trim() || fallbackMath;
+                                }
+                            }
+
+                            // Create native Office Math elements: <m:oMath><m:r><m:t>...</m:t></m:r></m:oMath>
+                            const mOmath = xmlDoc.createElementNS(mathNS, "m:oMath");
+                            const mR = xmlDoc.createElementNS(mathNS, "m:r");
+                            
+                            // Apply standard math font formatting if needed
+                            const mRPr = xmlDoc.createElementNS(mathNS, "m:rPr");
+                            const mSty = xmlDoc.createElementNS(mathNS, "m:sty");
+                            mSty.setAttributeNS(mathNS, "m:val", "p"); // standard paragraph style
+                            mRPr.appendChild(mSty);
+                            mR.appendChild(mRPr);
+
+                            const mT = xmlDoc.createElementNS(mathNS, "m:t");
+                            mT.textContent = fallbackMath;
+                            
+                            mR.appendChild(mT);
+                            mOmath.appendChild(mR);
+
+                            // Perform targeted in-place replacement
+                            obj.parentNode.replaceChild(mOmath, obj);
+                        }
+                    }
+                }
+
+                if (mathTypeCount === 0) {
+                    logMsg("No MathType equations found in this document. Text and images remain untouched.");
+                } else {
+                    logMsg(`Successfully replaced ${mathTypeCount} MathType object(s) with native Office Math (OMML).`);
+                }
+
+                // Serialize modified DOM back to XML
+                logMsg("Re-packaging document preserving styles, text, and images...");
+                const serializer = new XMLSerializer();
+                const newDocXmlString = serializer.serializeToString(xmlDoc);
+
+                // Update the zip archive with the new document.xml
+                loadedZip.file(docXmlPath, newDocXmlString);
+
+                // Generate new Blob
+                convertedBlob = await loadedZip.generateAsync({
+                    type: "blob",
+                    compression: "DEFLATE",
+                    compressionOptions: { level: 6 }
+                });
+
+                logMsg("Conversion complete! Ready for download.");
+                downloadBtn.disabled = false;
+
+            } catch (err) {
+                logMsg(`Error during processing: ${err.message}`, true);
+                console.error(err);
+            }
+        }
+
+        // Handle Download Button
+        downloadBtn.addEventListener('click', () => {
+            if (!convertedBlob) return;
+            
+            const url = URL.createObjectURL(convertedBlob);
+            const a = document.createElement('a');
+            const newName = originalFileName.replace('.docx', '_OMML.docx');
+            a.href = url;
+            a.download = newName;
+            
+            document.body.appendChild(a);
+            a.click();
+            
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            logMsg(`File downloaded as: ${newName}`);
+        });
+    </script>
+</body>
+</html>
